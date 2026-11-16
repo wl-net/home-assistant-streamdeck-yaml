@@ -1,0 +1,14 @@
+# Ignore file for the fork's ./Dockerfile only (BuildKit picks up <Dockerfile>.dockerignore),
+# so upstream's Dockerfile.latest / Dockerfile.locked, which copy .git, keep working.
+.git
+.github
+.venv
+.env
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.coverage
+htmlcov
+*.egg-info
+build
+dist

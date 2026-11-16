@@ -1,0 +1,16 @@
+# Runtime dependencies of the container image (fork-specific).
+# Mirrors [tool.unidep] in pyproject.toml; native libs (libcairo, hidapi/libusb)
+# come from Debian in the Dockerfile. Compile the lock with docker/lock.sh.
+cairosvg
+jinja2
+lxml
+# Optional upstream feature (`colormap` for light buttons); upstream's image ships it.
+matplotlib
+pillow
+pydantic<2
+python-dotenv
+pyyaml
+requests
+rich
+streamdeck
+websockets

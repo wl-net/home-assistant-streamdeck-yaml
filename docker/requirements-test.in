@@ -1,0 +1,6 @@
+# Test-only dependencies, constrained to the runtime lock (see ../Dockerfile, target "test").
+pytest
+pytest-asyncio
+pytest-cov
+pandas
+tabulate
