@@ -1,0 +1,56 @@
+# Fork-specific (see FORK.md): weekly re-resolve docker/requirements*.txt and open a PR.
+name: lock-refresh
+
+on:
+  schedule:
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # push the deps/lock-refresh branch
+      pull-requests: write # open the pull request
+      actions: write # dispatch the image workflow on that branch
+    env:
+      BRANCH: deps/lock-refresh
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Re-resolve the locks to the newest allowed versions
+        run: docker/lock.sh --upgrade
+      - name: Open or update the pull request
+        run: |
+          if git diff --quiet -- docker; then
+            echo "Lock files are already current."
+            exit 0
+          fi
+          changes=$(git diff -U0 -- 'docker/*.txt' | grep -E '^[-+][A-Za-z0-9]' | sed 's/ *\\$//' || true)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$BRANCH"
+          git commit -qam "Refresh locked Python dependencies"
+          git push --force origin "$BRANCH"
+          body="$RUNNER_TEMP/pr-body.md"
+          cat > "$body" <<'EOF'
+          Weekly `docker/lock.sh --upgrade` (see FORK.md).
+
+          Checks come from the `image` workflow dispatched on this branch: pull requests opened
+          with GITHUB_TOKEN do not trigger workflows themselves.
+
+          ```diff
+          EOF
+          printf '%s\n```\n' "$changes" >> "$body"
+          if [ -n "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            gh pr edit "$BRANCH" --body-file "$body"
+          else
+            gh pr create --base main --head "$BRANCH" --title "Refresh locked Python dependencies" --body-file "$body"
+          fi
+          gh workflow run image.yml --ref "$BRANCH"

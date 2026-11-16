@@ -1,0 +1,34 @@
+# Fork-specific (see FORK.md). Python pins in docker/requirements*.txt are refreshed by
+# .github/workflows/lock-refresh.yml. Upstream's files are excluded so updates never touch them.
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: /
+    exclude-paths:
+      - Dockerfile.dockerignore
+      - Dockerfile.latest
+      - Dockerfile.locked
+    schedule:
+      interval: weekly
+    ignore:
+      # Stay on the Python minor version the locks are resolved for; bump that by hand.
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+    groups:
+      base-image:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    exclude-paths:
+      - .github/workflows/automerge.yml
+      - .github/workflows/docker-build.yml
+      - .github/workflows/pytest.yml
+      - .github/workflows/release.yml
+      - .github/workflows/toc.yaml
+      - .github/workflows/update-readme.yml
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

@@ -1,0 +1,164 @@
+# Fork-specific (see FORK.md): test, build and publish ghcr.io/wl-net/home-assistant-streamdeck-yaml.
+name: image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  schedule:
+    - cron: "23 5 * * 1" # weekly rebuild to pick up Debian package updates on the pinned base
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/wl-net/home-assistant-streamdeck-yaml
+  UPSTREAM_REPO: https://github.com/basnijholt/home-assistant-streamdeck-yaml.git
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Derive the version
+        id: version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version=${GITHUB_REF_NAME#v}
+          else
+            # Upstream release tags (vYYYY.M.P) plus the number of commits since, e.g. 2026.5.2.post12.
+            git fetch --quiet --no-tags "$UPSTREAM_REPO" 'refs/tags/v*:refs/tags/v*' \
+              || echo "::warning::Could not fetch upstream release tags"
+            desc=$(git describe --tags --long --abbrev=7 --match 'v[0-9]*' --exclude '*.post*') \
+              || desc="v0.0.0-$(git rev-list --count HEAD)-g$(git rev-parse --short=7 HEAD)"
+            base=${desc%-*-g*}
+            base=${base#v}
+            distance=${desc%-g*}
+            distance=${distance##*-}
+            if [ "$distance" = 0 ]; then version=$base; else version="$base.post$distance"; fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Version: $version"
+
+  test:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Run pytest inside the image (target "test")
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: test
+          platforms: linux/${{ matrix.arch }}
+          build-args: VERSION=${{ env.VERSION }}
+          no-cache: ${{ github.event_name == 'schedule' }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
+      - name: Build the runtime image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: runtime
+          platforms: linux/${{ matrix.arch }}
+          build-args: VERSION=${{ env.VERSION }}
+          load: true
+          tags: local/home-assistant-streamdeck-yaml:ci
+      - name: Start the entrypoint (no deck attached, so it must stop at "No Stream Deck found")
+        run: |
+          img=local/home-assistant-streamdeck-yaml:ci
+          installed=$(docker run --rm "$img" python -c \
+            'import importlib.metadata as m; print(m.version("home_assistant_streamdeck_yaml"))')
+          test "$installed" = "$VERSION" || { echo "::error::installed version $installed != $VERSION"; exit 1; }
+          printf '%s\n' 'pages:' '  - name: Home' '    buttons:' \
+            '      - entity_id: light.example' '        service: light.toggle' > "$RUNNER_TEMP/configuration.yaml"
+          out=$(docker run --rm --network host --cap-drop ALL --security-opt no-new-privileges \
+            -v "$RUNNER_TEMP/configuration.yaml:/app/configuration.yaml:ro" \
+            -e HASS_HOST=localhost -e HASS_TOKEN=ci -e COLUMNS=200 "$img" 2>&1) || true
+          printf '%s\n' "$out"
+          grep -q "No Stream Deck found" <<<"$out"
+
+  build:
+    needs: [version, test]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      # Only main and v* tags publish; manual runs on other branches just build.
+      PUBLISH: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=${{ env.VERSION }}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=home-assistant-streamdeck-yaml
+            org.opencontainers.image.description=Home Assistant on Stream Deck, configured via YAML (wl-net fork build)
+          annotations: |
+            org.opencontainers.image.description=Home Assistant on Stream Deck, configured via YAML (wl-net fork build)
+      - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build (and push) linux/amd64 + linux/arm64
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64,linux/arm64
+          build-args: VERSION=${{ env.VERSION }}
+          push: ${{ env.PUBLISH == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          no-cache: ${{ github.event_name == 'schedule' }}
+          cache-from: |
+            type=gha,scope=amd64
+            type=gha,scope=arm64
